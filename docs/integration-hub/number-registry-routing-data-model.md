@@ -1,7 +1,7 @@
 # Number Registry & Routing — Logical Data Model
 
 **Module:** 02 Integration Hub → Telephony (supports 05 Campaign/Inbound Router)
-**Version:** 0.2 (draft for design review)
+**Version:** 0.3 (draft for design review)
 **Date:** 17 October 2026
 **Depends on:** Telephony Capability Contract v0.1 (`telephony-contract-spec.md`)
 **Status:** Logical model. Physical schema, storage engine and serialisation are deferred. Carrier-specific facts and regulatory rules must be validated per provider and per client.
@@ -28,7 +28,10 @@ Define the system of record for **numbers (DIDs/CLIs), provider accounts, routes
 | # | Decision | Model consequence |
 |---|---|---|
 | D1 | **Daythree is owner of record for every number.** | `owner_of_record` is fixed to `daythree`. Numbers are held on Daythree-managed provider accounts and **allocated** to a tenant/client as a right of use. Regulatory submissions are made by Daythree. BYO / client-owned numbers and `import_number` are out of scope for v1. |
-| D2 | **Number pools are modelled, but any campaign or route may use a fixed number instead.** | A campaign's outbound CLI source is exactly one of: a fixed number or a pool. Pools are an optional capability per tenant; `fixed` is the default strategy. |
+| D2 | **Number pools are modelled, but any campaign may use a fixed number instead.** | A campaign's outbound CLI source is exactly one of: a fixed number or a pool. *(Amended by D5: pools are a first-release feature, not optional.)* |
+| D4 | **A number has one exclusive role: `inbound_line` or `outbound_line`.** An inbound number is never used as outbound CLI. | `purpose` value `both` is removed. Outbound lines carry a mandatory `CallbackLandingPolicy` so a customer returning a call is never met with a dead line. |
+| D5 | **Outbound CLI is randomised from a pool that may span providers** (first release: Twilio plus one other carrier). | Pools are first-release. Default strategy is constrained random. A call leaves through the provider that holds the chosen number. |
+| D6 | **Only super admin / admin roles may buy or release numbers.** | `number.order` and `number.release` are restricted to those roles. Spend cap and audit still apply. |
 | D3 | **No shared inbound numbers.** | An inbound number has exactly one active route, belonging to exactly one tenant and client. Enforced at write time, publish validation and snapshot compile. |
 
 Assumption to confirm (flagged, not decided): outbound CLI numbers are also allocated to a single client, so that reputation and complaints are attributable. Pools are therefore client-scoped, never cross-client.
@@ -129,7 +132,7 @@ Drift detection compares desired vs actual carrier configuration on a schedule a
 | `country`, `number_type` | geographic, mobile, toll-free, shared-cost, other |
 | `capabilities` | voice_in, voice_out, sms, whatsapp |
 | `provider_account_id` | Current holder |
-| `purpose` | `inbound`, `outbound_cli`, `both` |
+| `role` | `inbound_line`, `outbound_line` (exclusive, D4). Changing role requires release-to-stock, a cooling period and a new activation |
 | `lifecycle_state` | See 5.1 |
 | `restriction_reason` | If restricted/quarantined |
 | `owner_of_record` | Fixed `daythree` (D1). Field retained so a future BYO model does not need a schema change; writes of any other value are rejected in v1 |
@@ -192,7 +195,11 @@ Groups outbound CLIs for selection.
 |---|---|
 | `pool_id`, `tenant_id`, `client_id` | |
 | `name`, `purpose` | |
-| `selection_strategy` | `fixed`, `round_robin`, `weighted`, `reputation_weighted`, `local_presence` (reserved) |
+| `selection_strategy` | `fixed`, `random_constrained` (default), `weighted`, `reputation_weighted`, `round_robin`, `local_presence` (reserved) |
+| `spans_providers` | Boolean. When true, members may sit on different provider accounts |
+| `provider_weights` | Optional share per provider account, used before health and cost adjustments |
+| `sticky_mode` | `off` (default), `per_customer_campaign`. When on, a customer is shown the same number within a campaign unless it is unavailable |
+| `fallback_on_provider_degraded` | Redistribute weight away from a degraded provider |
 | `max_calls_per_number_per_day/hour` | Volume ceiling to protect reputation |
 | `min_reputation` | Below this a member is skipped |
 | `status` | |
@@ -203,9 +210,28 @@ Groups outbound CLIs for selection.
 | `weight`, `priority` | |
 | `status` | `active`, `paused`, `quarantined` |
 
-**Fixed vs pool (D2):** a campaign's `CallerIdPolicy` names either a fixed `number_id` (via an `outbound_campaign` assignment) or a `pool_id`, never both. `selection_strategy = fixed` is the default and the only strategy enabled in the first release; other strategies are gated by a per-tenant capability flag. Pools are scoped to one client.
+**Fixed vs pool (D2):** a campaign's `CallerIdPolicy` names either a fixed `number_id` (via an `outbound_campaign` assignment) or a `pool_id`, never both. A fixed number remains allowed for any campaign (D2). Pools are a first-release feature (D5) and default to `random_constrained`: choose randomly from the eligible set after removing numbers that are quarantined, over their volume ceiling, below minimum reputation, on a degraded provider, or not approved for the campaign. Pools are scoped to one client and contain only `outbound_line` numbers.
+
+**Provider follows number:** the dial is routed through the provider account that holds the selected number. A pool spanning two providers therefore splits traffic by how many eligible numbers (and what weights) each provider has, not by a separate provider choice.
 
 Rotation changes which number is presented only. It has **no effect** on suppression, consent, windows or retry counters (those key on customer/contact point).
+
+#### `CallbackLandingPolicy`
+Defines what happens when someone calls back an `outbound_line` number (D4). It is not an inbound route and does not make the number part of the inbound pool.
+| Field | Notes |
+|---|---|
+| `landing_policy_id`, `tenant_id`, `client_id` | |
+| `applies_to` | A pool, a campaign or a single number |
+| `behaviour` | `message_and_redirect` (play approved message pointing to the inbound line; first release default), `message_and_end`, `ai_with_context` (connect to the voicebot using the recent outbound attempt as context; later release), `transfer_to_destination` |
+| `redirect_inbound_number_id` | The client's inbound line to tell the caller to use, when applicable |
+| `message_asset_ref` | Approved, versioned audio asset |
+| `context_lookback_days` | How long a prior outbound attempt can be matched to the caller (for `ai_with_context`) |
+| `identity_required_before_disclosure` | Always true: the matched earlier call is a hint, not authentication |
+| `recording_policy_ref`, `disclosure_policy_ref` | |
+| `capacity_limit`, `after_hours_behaviour`, `failure_action` | |
+| `version`, `status` | Versioned and approved like routes |
+
+Rules: an `outbound_line` cannot be set `active` without an approved landing policy; callbacks are logged as inbound events on that number (`call.inbound_received` with `landing_policy_id`) and linked to the earlier attempt where matched; all landing behaviours respect suppression and DNC.
 
 #### `NumberReputationSnapshot`
 Periodic rollup per outbound number.
@@ -430,6 +456,10 @@ Released numbers are retained as records and their E.164 is not reusable by anot
 14. A number has at most one allocated tenant/client; all its assignments, CLI approvals and pool memberships belong to that same tenant/client.
 15. A campaign's CLI source is exactly one of a fixed number or a pool.
 16. No inbound number is shared across routes, clients or tenants.
+17. A number's `role` is exclusive: an `inbound_line` is never in a pool or used as outbound CLI; an `outbound_line` never has an inbound route (it has a `CallbackLandingPolicy`).
+18. An `outbound_line` cannot be active without an approved `CallbackLandingPolicy`.
+19. `number.order` and `number.release` require the super admin / admin role (D6) in addition to change-request approval for high-risk cases.
+20. Contactability status of customer numbers (contactable, not contactable, blocked-suspected, etc.) is **not** stored in this model; it belongs to the Campaign module's contact-point record and is fed by telephony outcomes. This model only receives aggregated per-number outcome counts (reputation).
 
 ---
 
@@ -575,7 +605,7 @@ Alerts: regulatory expiry (T-30/T-7), quarantine, sustained answer-rate drop, dr
 3. `Destination`, `Schedule`, `Route`/`RouteVersion`/`RouteRule`, validation, `RoutingSnapshot`
 4. `RouteFallback`, `KillSwitchState`, policies (capacity, spend, destination, CLI)
 5. `NumberCliApproval` workflow
-6. Reputation snapshots, quarantine, pools (after first production traffic)
+6. Pools with constrained random selection across providers, `CallbackLandingPolicy`, reputation snapshots and quarantine (all first release per D4/D5; step 6 now runs in parallel with step 3)
 
 **Exit gate:** publish a route, take a real inbound call resolved from a snapshot with full decision trace; roll back to the prior version within one minute; refuse an unapproved CLI; fall back to a human destination when the platform is deliberately disabled; reproduce every change from the audit trail.
 
@@ -586,4 +616,5 @@ Alerts: regulatory expiry (T-30/T-7), quarantine, sustained answer-rate drop, dr
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 17 Oct 2026 | Initial draft |
+| 0.3 | 17 Oct 2026 | Applied D4 (exclusive number role, callback landing), D5 (first-release cross-provider pools, constrained random), D6 (admin-only purchase); added `CallbackLandingPolicy`; constraints 17–20 |
 | 0.2 | 17 Oct 2026 | Applied decisions D1 (Daythree owner of record), D2 (pools modelled, fixed assignment allowed), D3 (no shared inbound); added allocation fields, client authorisation, constraints 13–16 |

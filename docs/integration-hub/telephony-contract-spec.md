@@ -120,7 +120,7 @@ Uses the platform identifiers defined in Blueprint §3.1. Telephony adds:
 | `verify_caller_id` | Verify a number as presentable CLI where carrier requires | Async |
 
 ### 5.2 Number record (logical fields)
-`number_id`, `e164`, `country`, `number_type` (geographic, mobile, toll-free, shared-cost, other), `capabilities` (voice in/out, sms, whatsapp), `provider`, `provider_account_id`, `provider_ref`, `tenant_id`, `client_id`, `purpose` (inbound, outbound_cli, both), `lifecycle_state`, `regulatory_status`, `bound_route_id`, `bound_campaign_ids`, `cli_approval` (approver, date, scope, expiry), `monthly_cost`, `rate_card_ref`, `reputation_score`, `reputation_flags`, `created_at`, `activated_at`, `released_at`, `owner_of_record` (Daythree / client / third party).
+`number_id`, `e164`, `country`, `number_type` (geographic, mobile, toll-free, shared-cost, other), `capabilities` (voice in/out, sms, whatsapp), `provider`, `provider_account_id`, `provider_ref`, `tenant_id`, `client_id`, `role` (inbound_line, outbound_line; exclusive), `lifecycle_state`, `regulatory_status`, `bound_route_id`, `bound_campaign_ids`, `cli_approval` (approver, date, scope, expiry), `monthly_cost`, `rate_card_ref`, `reputation_score`, `reputation_flags`, `created_at`, `activated_at`, `released_at`, `owner_of_record` (Daythree / client / third party).
 
 ### 5.3 Lifecycle
 ```
