@@ -466,7 +466,7 @@ An adapter is certified only when it passes, against a sandbox:
 |---|---|---|---|
 | 1 | Media transport for first release | Carrier-hosted stream vs SIP to platform media server | Latency, cost, ops burden |
 | 2 | Provider account topology | Sub-account per tenant vs BYO vs shared | Isolation, cost attribution, white-label |
-| 3 | Number ownership of record | Daythree reseller vs client direct | Regulatory documents, portability |
+| 3 | ~~Number ownership of record~~ | **Resolved: Daythree is owner of record.** Numbers are allocated to clients as a right of use; no shared inbound numbers; pools optional, fixed assignment allowed | Regulatory documents are submitted by Daythree; offboarding and port-out policy still to define |
 | 4 | Malaysian number types and regulatory requirements | To be validated with carrier | Go-live feasibility |
 | 5 | Human transfer destinations (first release) | Client PBX/SIP/PSTN numbers | Transfer design, warm vs blind |
 | 6 | Machine-detection policy | End, approved message, flag | Disclosure risk |

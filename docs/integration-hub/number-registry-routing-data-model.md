@@ -1,7 +1,7 @@
 # Number Registry & Routing — Logical Data Model
 
 **Module:** 02 Integration Hub → Telephony (supports 05 Campaign/Inbound Router)
-**Version:** 0.1 (draft for design review)
+**Version:** 0.2 (draft for design review)
 **Date:** 17 October 2026
 **Depends on:** Telephony Capability Contract v0.1 (`telephony-contract-spec.md`)
 **Status:** Logical model. Physical schema, storage engine and serialisation are deferred. Carrier-specific facts and regulatory rules must be validated per provider and per client.
@@ -22,6 +22,16 @@ Define the system of record for **numbers (DIDs/CLIs), provider accounts, routes
 | Keyed on the customer, not the number | Suppression, consent and retry state never live on or depend on a number record |
 | Cost-aware | Every number and route links to a rate card and to cost attribution |
 | Event-driven | Registry changes emit events; read models are projections |
+
+### 1.1 Decisions applied in v0.2
+
+| # | Decision | Model consequence |
+|---|---|---|
+| D1 | **Daythree is owner of record for every number.** | `owner_of_record` is fixed to `daythree`. Numbers are held on Daythree-managed provider accounts and **allocated** to a tenant/client as a right of use. Regulatory submissions are made by Daythree. BYO / client-owned numbers and `import_number` are out of scope for v1. |
+| D2 | **Number pools are modelled, but any campaign or route may use a fixed number instead.** | A campaign's outbound CLI source is exactly one of: a fixed number or a pool. Pools are an optional capability per tenant; `fixed` is the default strategy. |
+| D3 | **No shared inbound numbers.** | An inbound number has exactly one active route, belonging to exactly one tenant and client. Enforced at write time, publish validation and snapshot compile. |
+
+Assumption to confirm (flagged, not decided): outbound CLI numbers are also allocated to a single client, so that reputation and complaints are attributable. Pools are therefore client-scoped, never cross-client.
 
 ---
 
@@ -112,16 +122,18 @@ Drift detection compares desired vs actual carrier configuration on a schedule a
 | Field | Notes |
 |---|---|
 | `number_id` (PK) | |
-| `tenant_id`, `client_id?` | Owner scope |
-| `e164`, `e164_hash` | Unique per (`tenant_id`, `e164`) among non-released records |
+| `holder_account_id` | Daythree-managed provider account that holds the number (see `ProviderAccount`) |
+| `allocated_tenant_id`, `allocated_client_id?` | Right-of-use allocation; null while in the unallocated Daythree stock. Exactly one tenant/client at a time |
+| `allocation_state` | `stock`, `allocated`, `reclaiming` |
+| `e164`, `e164_hash` | Globally unique among non-released records (Daythree owns all numbers, so uniqueness is platform-wide, not per tenant) |
 | `country`, `number_type` | geographic, mobile, toll-free, shared-cost, other |
 | `capabilities` | voice_in, voice_out, sms, whatsapp |
 | `provider_account_id` | Current holder |
 | `purpose` | `inbound`, `outbound_cli`, `both` |
 | `lifecycle_state` | See 5.1 |
 | `restriction_reason` | If restricted/quarantined |
-| `owner_of_record` | `daythree`, `client`, `third_party` |
-| `acquisition_type` | `ordered`, `imported`, `ported_in` |
+| `owner_of_record` | Fixed `daythree` (D1). Field retained so a future BYO model does not need a schema change; writes of any other value are rejected in v1 |
+| `acquisition_type` | `ordered`, `ported_in` (`imported` disabled in v1) |
 | `rate_card_ref` | Rental and usage rates |
 | `monthly_cost`, `currency` | Estimated rental |
 | `activated_at`, `released_at` | |
@@ -148,7 +160,8 @@ Authorises a number to be **presented** to callees.
 | `client_id` | Which client may present it |
 | `scope` | `all_campaigns`, `campaign_list`, `vertical`, `route_only` |
 | `campaign_ids?` | When scoped |
-| `ownership_evidence_ref` | |
+| `ownership_evidence_ref` | Daythree's holding evidence for the number (D1) |
+| `client_authorisation_ref` | Client's written authorisation for calls to be made in its name from this number (letter of authority or equivalent) |
 | `verification_status` | Carrier-side verification where required |
 | `approved_by`, `approved_at`, `expires_at` | Approver must hold the approval permission and differ from requester |
 | `status` | `pending`, `approved`, `revoked`, `expired` |
@@ -168,6 +181,8 @@ Binds a number to a purpose. A number can hold several assignments over time but
 
 Constraints
 - Unique active inbound assignment per number (no two routes answer one DID at the same time).
+- **No shared inbound (D3):** the route targeted by an inbound assignment must belong to the same tenant and client as the number's allocation. An inbound number is never referenced by routes of two clients, and a route rule cannot hand off to another client's route.
+- An assignment target must belong to the number's allocated tenant/client; moving a number between clients requires `reclaiming` → `stock` → re-allocation with all assignments ended first.
 - An outbound CLI assignment requires an approved `NumberCliApproval`.
 - Assignment overlap rules are enforced at write time and again at snapshot compile time.
 
@@ -187,6 +202,8 @@ Groups outbound CLIs for selection.
 | `pool_id`, `number_id` | Composite key |
 | `weight`, `priority` | |
 | `status` | `active`, `paused`, `quarantined` |
+
+**Fixed vs pool (D2):** a campaign's `CallerIdPolicy` names either a fixed `number_id` (via an `outbound_campaign` assignment) or a `pool_id`, never both. `selection_strategy = fixed` is the default and the only strategy enabled in the first release; other strategies are gated by a per-tenant capability flag. Pools are scoped to one client.
 
 Rotation changes which number is presented only. It has **no effect** on suppression, consent, windows or retry counters (those key on customer/contact point).
 
@@ -409,6 +426,10 @@ Released numbers are retained as records and their E.164 is not reusable by anot
 10. Suppression, consent, wrong-party and retry state are **not** attributes of any entity in this model.
 11. Every mutation produces an `AuditEvent` linked to a `ChangeRequest`.
 12. Released number E.164 cannot be reassigned within the cooling period.
+13. `owner_of_record` is `daythree` for every number in v1.
+14. A number has at most one allocated tenant/client; all its assignments, CLI approvals and pool memberships belong to that same tenant/client.
+15. A campaign's CLI source is exactly one of a fixed number or a pool.
+16. No inbound number is shared across routes, clients or tenants.
 
 ---
 
@@ -532,15 +553,17 @@ Alerts: regulatory expiry (T-30/T-7), quarantine, sustained answer-rate drop, dr
 
 ## 15. Open questions
 
-1. **Number ownership of record:** Daythree reseller vs client direct — determines `owner_of_record` rules, who signs regulatory items, and portability on offboarding.
-2. **Pools in the first release:** the model includes them, but the first release may use fixed CLI assignments only. Confirm.
+1. ~~Number ownership of record~~ — **Resolved (D1):** Daythree. Still to define: offboarding policy (a client leaving cannot take the number unless the contract and carrier allow porting out), client authorisation wording, and whether Daythree can pass regulatory-holder obligations to clients where a regulator requires the end user's details.
+2. ~~Pools in the first release~~ — **Resolved (D2):** pools modelled; fixed assignment allowed and default.
 3. **Caller recognition lists** (VIP, priority, blocklists): are they route-rule conditions referencing an external list, or a new entity? Privacy impact because they hold customer numbers.
 4. **Workflow reference by alias vs pinned version:** aliases allow fast fixes but weaken change control. Recommend pinned versions for regulated routes, aliases only for non-regulated.
 5. **Destination verification:** how is consent/ownership of a client's transfer number evidenced?
 6. **Number cooling period** length and whether reputation history follows a number across tenants (recommend no).
 7. **Multi-region and data residency:** single primary region or per-region registries per tenant?
 8. **Unknown-number policy:** default action for calls to a number with no active route.
-9. **Shared numbers across clients** (inbound IVR sharing one DID): allowed or forbidden? Recommend forbidden in v1.
+9. ~~Shared numbers across clients~~ — **Resolved (D3):** forbidden. Open sub-question: may one client share one inbound number across its own campaigns/lines? Current model says yes only through a single route with rules, never through multiple routes.
+11. **Outbound CLI sharing across clients:** assumed single-client allocation (see 1.1). Confirm.
+12. **Number inventory ahead of demand:** Daythree stock holding cost vs speed of onboarding; who bears the rental for unallocated stock?
 10. **Carrier-side fallback capability** varies by carrier; the adapter capability declaration must state what it can enforce.
 
 ---
@@ -563,3 +586,4 @@ Alerts: regulatory expiry (T-30/T-7), quarantine, sustained answer-rate drop, dr
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 17 Oct 2026 | Initial draft |
+| 0.2 | 17 Oct 2026 | Applied decisions D1 (Daythree owner of record), D2 (pools modelled, fixed assignment allowed), D3 (no shared inbound); added allocation fields, client authorisation, constraints 13–16 |
