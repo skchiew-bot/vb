@@ -1,7 +1,7 @@
 # Integration Hub & Voice Layer — Requirements
 
 **Module scope:** 02 Integration Hub (telephony and AI providers), 05 Number/DID routing, 07 Conversational Voice Engine (talent, listening, pronunciation), 12 Observatory (voice-asset pre-recording)
-**Version:** 0.1 (draft for design review)
+**Version:** 0.2 (draft for design review)
 **Date:** 17 October 2026
 **Related:** `telephony-contract-spec.md` (v0.1), `number-registry-routing-data-model.md` (v0.3)
 **Status:** Requirements captured from product owner. Provider behaviour, limits, pricing, Malaysian/Singapore regulatory rules and voice licensing terms must be validated before build commitments.
@@ -36,8 +36,13 @@ Let an authorised administrator connect telephony and AI voice providers by ente
 | D8 | Pre-recorded assets auto-publish, then are checked by an AI council for tone, pitch, conversation flow and emotional consistency | Product owner (see risk R-3) |
 | D9 | Non-speech sounds (mm, um, uh, cough, low-frequency/background noise) must not interrupt the bot | Product owner |
 | D10 | AI provider credentials are entered and stored in settings; the voice stack can fail over between ElevenLabs and OpenAI in both directions | Product owner |
+| D11 | Second carrier is **Telnyx**; outbound pools span Twilio and Telnyx; both adapters are first release | Product owner |
+| D12 | ElevenLabs and OpenAI each cover speech-to-text, language model and text-to-speech, so a full stack can run on either | Product owner (to be validated per language, see §6.3) |
+| D13 | Outbound caller-ID is random per attempt; no sticky number per customer | Product owner |
+| D14 | Two AI commercial modes: **BYOAI** (client's own keys; Daythree charges a 10% admin fee) and **Daythree AI** (platform keys; billed in credits) | Product owner (details and gaps in §5.5) |
+| D15 | Languages: English, Bahasa Malaysia, Mandarin, Singlish, Manglish, Cantonese, Tamil | Product owner (phasing in §6.3) |
 
-Open: the identity of the second carrier (decision Q1, §12).
+Open questions are listed in §12.
 
 ---
 
@@ -50,7 +55,7 @@ Open: the identity of the second carrier (decision Q1, §12).
 - Every step is logged to the audit trail with a result. Failures are explicit, with the step, cause and remedy.
 - Rotation and revocation do not drop live calls.
 
-### 3.2 Telephony onboarding flow (Twilio and the second carrier)
+### 3.2 Telephony onboarding flow (Twilio and Telnyx)
 | Step | Action | Result |
 |---|---|---|
 | 1 | Admin enters credentials and picks the data region | Stored in vault; reference only in database |
@@ -71,7 +76,7 @@ Same flow shape: enter → validate → discover → configure defaults → test
 
 | Group | Fields |
 |---|---|
-| Identity | provider (ElevenLabs / OpenAI), account label, environment (sandbox / production), tenant scope (platform-managed shared or tenant-specific) |
+| Identity | provider (ElevenLabs / OpenAI), account label, environment (sandbox / production), commercial mode (`daythree_ai` platform-managed, billed in credits; or `byoai` tenant-owned, billed at cost plus 10% admin fee; see §5.5), tenant scope |
 | Credentials | API key (vault reference, masked, last-4 shown, created/rotated date), optional organisation/project identifier, optional additional keys (e.g. separate key for realtime or admin) |
 | Endpoint | base URL / region, data-residency region, proxy settings if any |
 | Allowed capabilities | speech-to-text, language model, text-to-speech, speech-to-speech/realtime, voice design/cloning, pronunciation dictionaries, sound generation |
@@ -196,6 +201,32 @@ Rules
 - Change history and audit trail.
 - Permissions: super admin edits; admin views; changes to credentials and failover thresholds are high-risk changes requiring a second approver.
 
+### 5.5 Commercial modes: BYOAI and Daythree AI (D14)
+
+| | **Daythree AI** | **BYOAI** |
+|---|---|---|
+| Keys | Daythree's provider accounts (platform-managed) | Client's own keys, entered in the client's settings, stored in the vault under that tenant |
+| Provider bill | Paid by Daythree | Paid by the client directly to the provider |
+| Client is charged | **Credits** consumed per usage unit at the Daythree rate card | **10% admin fee** on the provider usage cost |
+| Cost visibility | Daythree knows its true cost and margin | Cost must be taken from usage the platform meters and, where available, reconciled to the provider's usage data |
+| Data terms | Daythree's provider agreements | Client's provider agreements; the client is responsible for its own retention and training settings |
+
+**Required behaviour**
+- Metering keeps the two modes in separate ledgers per tenant: a **credit ledger** (balance, top-ups, consumption, expiry) and an **admin-fee ledger** (provider cost base, 10%, invoice period).
+- Every usage event carries `ai_commercial_mode`, provider account, stack profile and the rate card version, so the same call can be priced correctly even when it switches stack.
+- Credits: pre-call balance check; reserve credits for active campaigns; low-balance alerts at configurable thresholds; defined behaviour at zero (stop new outbound dials, finish live calls, keep inbound service per policy).
+- Credit price per unit is configured by Daythree and versioned; changes do not rewrite past usage.
+- Fee base is a decision for you (Q11): 10% of metered provider cost, or of the provider invoice. Metered cost is available immediately; provider invoices are authoritative but arrive late and need reconciliation.
+
+**Failover across modes — a billing gap to close**
+If a client's BYOAI provider fails and the platform fails over to the standby, who pays? Options:
+1. Standby must also be that client's own key (clean billing, but no protection if the client has only one key).
+2. Fail over to Daythree AI and charge credits (better continuity; requires the client's consent in contract and sufficient credits).
+3. Block failover across modes and hand off to a human or callback.
+Default recommendation: option 1 where the client supplies two providers, otherwise option 2 only with prior opt-in and credits available; never switch modes silently. Each failover event records which mode served each turn.
+
+**FinOps:** margin per tenant = credit revenue or admin fee minus Daythree's own provider cost (zero provider cost for BYOAI, so the admin fee must cover platform compute, QA, storage and support). Check that 10% covers those costs at scale; QA council, pre-recording and monitoring costs run on Daythree's own models and are not covered by the client's keys.
+
 ---
 
 ## 6. Voice talent (D7)
@@ -215,7 +246,22 @@ Fields (logical): `talent_id`, name, description, markets (Malaysia, Singapore),
 7. Publish the talent version; monitor in production.
 
 ### 6.3 Localisation
-Malaysian and Singapore talents are separate personas, not one accent setting. Code-switching (English / Bahasa Malaysia) and local usage must be covered in test scripts. The pronunciation hot-list covers local place names, banks, telcos, common names and terms.
+Malaysian and Singapore talents are separate personas, not one accent setting. Code-switching (for example English with Bahasa Malaysia, or Mandarin with English) and local usage must be covered in test scripts. The pronunciation hot-list covers local place names, banks, telcos, common names and terms.
+
+**Language scope (D15) and how to treat it**
+| Language | Nature | Key risk |
+|---|---|---|
+| English | Standard | Baseline |
+| Bahasa Malaysia | Standard | Formal vs colloquial register |
+| Manglish | English variety with Malay/Chinese/Tamil mixing | Recognition accuracy; no formal standard; speaking style must sound natural, not caricature |
+| Singlish | English variety with Hokkien/Malay/Mandarin influence | Same; plus tone and respect conventions |
+| Mandarin | Standard language | Accent: Malaysian vs Singaporean vs mainland; script (simplified/traditional) for any text |
+| Cantonese | Spoken variety | Weaker provider support in recognition and synthesis; romanisation and name pronunciation vary |
+| Tamil | Standard language | Provider support and voice quality may be limited; names and code-switching |
+
+Per-language requirements: a **capability matrix** per provider and function (recognition, reasoning, synthesis, pronunciation control, expressiveness), measured on your own test sets rather than taken from provider claims; native-speaker reviewers for the council calibration set; separate pronunciation dictionary scope per language; language identification and a defined handling of code-switching within a call; a defined fallback when a language fails on one provider (switch provider for that language, transfer to a human, or offer another language).
+
+**Recommended phasing** (to be validated by the capability matrix): English, Bahasa Malaysia and Manglish first; then Mandarin and Singlish; then Cantonese and Tamil once recognition and voice quality pass thresholds. Do not announce a language to clients as supported until it passes the scenario suite on at least one full stack.
 
 ### 6.4 Controls
 - AI disclosure per regulation and client policy.
@@ -353,16 +399,21 @@ Abuse and risk scenarios
 
 | # | Question | Impact |
 |---|---|---|
-| Q1 | Who is the second carrier? | Second adapter scope, number availability, caller-ID rules |
-| Q2 | Which languages beyond English and Bahasa Malaysia (Mandarin, Tamil, Singlish handling) for Malaysia/Singapore talent? | Talent catalogue, dictionary, test sets |
+| Q1 | ~~Who is the second carrier?~~ **Resolved: Telnyx (D11).** Still to validate: Malaysian/Singapore number availability and regulatory requirements, caller-ID rules, media transport options and rate limits | Second adapter scope |
+| Q2 | ~~Languages~~ **Resolved (D15):** seven languages/varieties. Open: phasing in §6.3 and whether each client contracts for specific languages | Talent catalogue, dictionary, test sets |
 | Q3 | Regulatory expectations on caller-ID reachability and callback in Malaysia and Singapore | Callback landing default |
-| Q4 | Will ElevenLabs and OpenAI both serve STT, LLM and TTS, or does each cover specific functions? Which stack combinations are valid? | Stack profile design, failover coverage |
-| Q5 | Does any client require its own AI keys, or are all keys Daythree's (platform-managed)? | Tenancy of `AiProviderAccount` |
+| Q4 | ~~Function coverage~~ **Resolved (D12):** both cover all functions. Open: validation per language; whether to allow mixed stacks (one provider's voice with the other's reasoning) as well as single-provider stacks | Stack profile design, failover coverage |
+| Q5 | ~~BYO keys~~ **Resolved (D14):** both modes exist | Tenancy of `AiProviderAccount`, metering |
 | Q6 | Should regulated wording (disclosures, payment terms) be exempt from auto-publish? | Governance and compliance exposure |
 | Q7 | Is the emotion register set (§7.3) acceptable, or should it be larger? | Metadata, council rubric |
 | Q8 | Is mid-call provider switching acceptable to clients, or only between calls? | Failover design, customer experience |
 | Q9 | Data retention and zero-retention terms with each AI provider | Privacy and contracts |
-| Q10 | Sticky caller-ID per customer within a campaign: default on or off? | Answer rates vs customer recognition |
+| Q10 | ~~Sticky caller-ID~~ **Resolved (D13):** random per attempt | Answer rates vs customer recognition |
+| Q11 | Is the BYOAI 10% admin fee applied to Daythree's metered cost or to the client's provider invoice? Is there a minimum monthly fee? | Billing accuracy and margin |
+| Q12 | Do credits also cover telephony (carrier minutes, numbers), or only AI usage? How are carrier costs charged to clients? | Credit design, unit economics |
+| Q13 | When a BYOAI provider fails, may the platform fail over to Daythree AI and charge credits (opt-in), or must the client supply two providers? | Failover and billing (§5.5) |
+| Q14 | Credit behaviour at zero balance: stop new outbound only, or also inbound? Grace allowance? | Service continuity, collections exposure |
+| Q15 | Is the BYOAI client responsible for their provider's data terms (retention, training)? Is that stated in the contract? | Privacy and liability |
 
 ---
 
@@ -370,7 +421,7 @@ Abuse and risk scenarios
 
 | Wave | Content | Exit gate |
 |---|---|---|
-| A | Provider settings (telephony and AI), vault integration, Test Connection, onboarding for Twilio and second carrier, number registry with exclusive roles and admin-only purchase | Both carriers connected; test inbound/outbound on each; keys never visible after save |
+| A | Provider settings (telephony and AI), vault integration, Test Connection, onboarding for Twilio and Telnyx, number registry with exclusive roles and admin-only purchase | Both carriers connected; test inbound/outbound on each; keys never visible after save |
 | B | Pools across providers, constrained random selection, callback landing (message and redirect), contact-point status, reputation and quarantine | Randomised outbound across both carriers with full trace; callback to an outbound line handled |
 | C | Voice stack profiles, ElevenLabs and OpenAI connected, failover with talent twin, health detection, settings UI | Simulated provider outage fails over with a recorded seam and no dropped call |
 | D | Talent creation flow, Malaysia/Singapore talents, pronunciation dictionary and name check | Approved talents with parity on both providers; dictionary regression passing |
@@ -385,4 +436,5 @@ Waves C and D are the highest-risk and should start provider capability validati
 
 | Version | Date | Change |
 |---|---|---|
+| 0.2 | 17 Oct 2026 | D11–D15: Telnyx as second carrier, both AI providers cover all functions, random caller-ID, BYOAI vs Daythree AI commercial modes, seven-language scope; added §5.5 and language table |
 | 0.1 | 17 Oct 2026 | Initial requirements from product owner; decisions D1–D10; AI provider settings and failover |
